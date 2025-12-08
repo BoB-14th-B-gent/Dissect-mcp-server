@@ -20,6 +20,21 @@ ACQUIRE_BIN = os.getenv("DISSECT_ACQUIRE_BIN")
 ACQUIRE_OUTPUT_DIR = os.getenv("DISSECT_ACQUIRE_DIR")
 DEFAULT_EXTRACT_DIR = os.getenv("DISSECT_EXTRACT_DIR")
 
+_SYSTEM_PLUGINS = {
+    "hostname": "os.windows._os.hostname",
+    "os_version": "os.windows._os.version",
+    "os_slug": "os.windows._os.os",
+    "users": "os.windows._os.users",
+    "timezone": "os.windows.locale.timezone",
+    "language": "os.windows.locale.language",
+    "install_date": "os.windows.generic.install_date",
+    "domain": "os.windows.generic.domain",
+    "network_interfaces": "os.windows.network.interfaces",
+    "network_ips": "os.windows.network.ips",
+    "network_macs": "os.windows.network.macs",
+}
+
+
 class DissectError(RuntimeError):
     """Dissect 관련 외부 명령 실패 시 사용하는 예외."""
 
@@ -396,3 +411,73 @@ def extract_system_profile(image_path: str) -> Dict[str, Any]:
             profile["errors"][field] = str(e)
 
     return profile
+
+@mcp.tool()
+def search_keyword(
+    image_path: str,
+    plugin: str,
+    search: str,
+    max_rows: int = 0,
+) -> Dict[str, Any]:
+    """
+    target-query 출력에 rdump -s 표현식을 적용해 필터링된 결과를 JSON으로 반환.
+
+    쉘에서 사용하던 명령을 그대로 MCP로 감싼 형태:
+
+      - 전체 exe 검색:
+          target-query <image> -f walkfs | rdump -s "r.path.suffix=='.exe'" --json
+
+      - 특정 파일명 검색:
+          target-query <image> -f walkfs | rdump -s "r.path.name == 'ransom.exe'" --json
+
+    - plugin: target-query 에 사용할 플러그인 이름 (예: "walkfs")
+    - search: rdump -s 에 들어갈 표현식 (r.path.* 기반)
+    """
+    resolved = _resolve_image(image_path)
+
+    p1 = subprocess.Popen(
+        [TARGET_QUERY_BIN, resolved["target"], "-f", plugin],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    p2 = subprocess.Popen(
+        [RDUMP_BIN, "-s", search, "--json"],
+        stdin=p1.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if p1.stdout is not None:
+        p1.stdout.close()
+
+    out, err2 = p2.communicate()
+    _, err1 = p1.communicate()
+
+    if p2.returncode != 0:
+        return {
+            "image": resolved["original"],
+            "target": resolved["target"],
+            "plugin": plugin,
+            "search": search,
+            "error": {
+                "returncode": p2.returncode,
+                "stderr": (err1 or "") + "\n" + (err2 or ""),
+            },
+        }
+
+    parsed = _parse_query_output(out)
+    if isinstance(parsed, list) and max_rows and len(parsed) > max_rows:
+        parsed = parsed[:max_rows]
+
+    return {
+        "image": resolved["original"],
+        "target": resolved["target"],
+        "plugin": plugin,
+        "search": search,
+        "max_rows": max_rows,
+        "raw_stdout": out,
+        "parsed": parsed,
+    }
