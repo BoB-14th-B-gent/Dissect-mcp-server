@@ -34,6 +34,24 @@ _SYSTEM_PLUGINS = {
     "network_macs": "os.windows.network.macs",
 }
 
+_ARTIFACT_PLUGINS = {
+    "prefetch": ("os.windows.prefetch", "Windows Prefetch files"),
+    "amcache": ("os.windows.amcache.files", "Amcache files"),
+    "userassist": ("os.windows.regf.userassist", "UserAssist registry"),
+    "shellbags": ("os.windows.regf.shellbags", "Shellbags"),
+    "thumbcache": ("os.windows.thumbcache", "Thumbnail cache"),
+    "jumplist_auto": (
+        "os.windows.jumplist.automatic_destination",
+        "AutomaticDestination jumplist",
+    ),
+    "jumplist_custom": (
+        "os.windows.jumplist.custom_destination",
+        "CustomDestination jumplist",
+    ),
+    "evtx": ("os.windows.log.evtx", "Windows EVTX event logs"),
+    "mft": ("filesystem.ntfs.mft.records", "NTFS MFT records"),
+    "sru": ("os.windows.sru.application", "SRU Application usage"),
+}
 
 class DissectError(RuntimeError):
     """Dissect 관련 외부 명령 실패 시 사용하는 예외."""
@@ -241,6 +259,53 @@ def _parse_query_output(raw: str) -> Any:
         pass
 
     return [ln for ln in s.splitlines() if ln.strip()]
+
+def _ensure_extract_dir(base: Union[str, Path]) -> Path:
+    """
+    추출용 기본 디렉터리 생성/보장.
+
+    - base를 절대경로로 변환 후, 존재하지 않으면 mkdir -p
+    """
+    p = Path(base).expanduser().resolve()
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _extract_timestamp(record: Dict[str, Any]) -> Optional[str]:
+    """
+    각 레코드(dict)에서 timestamp 후보 필드를 휴리스틱으로 추출.
+
+    - 우선순위 키:
+      ["timestamp", "time", "datetime", "created", "modified",
+       "mtime", "atime", "ctime", "last_write_time", "start_time", "end_time"]
+    - 위 키가 없으면, *_time 으로 끝나는 키 중 첫 번째 truthy 값 사용
+    - 아무것도 없으면 None
+    """
+    if not isinstance(record, dict):
+        return None
+
+    candidate_keys = [
+        "timestamp",
+        "time",
+        "datetime",
+        "created",
+        "modified",
+        "mtime",
+        "atime",
+        "ctime",
+        "last_write_time",
+        "start_time",
+        "end_time",
+    ]
+
+    for k in candidate_keys:
+        if k in record and record[k]:
+            return str(record[k])
+
+    for k, v in record.items():
+        if k.endswith("_time") and v:
+            return str(v)
+
+    return None
 
 @mcp.tool()
 def disk_image_info(image_path: str) -> Dict[str, Any]:
@@ -481,3 +546,46 @@ def search_keyword(
         "raw_stdout": out,
         "parsed": parsed,
     }
+
+@mcp.tool()
+def detect_artifacts_existence(
+    image_path: str,
+    max_rows_per_artifact: int = 5,
+) -> Dict[str, Any]:
+    """
+    주요 윈도우 아티팩트 존재 여부 빠른 스캐닝.
+
+    - _ARTIFACT_PLUGINS 에 정의된 플러그인들을 각각 max_rows_per_artifact 개수만큼 실행
+    - parsed 결과가 비어있지 않으면 exists=True 로 표시
+    - 디스크 이미지에 어떤 아티팩트가 실제로 존재하는지 "존재 여부 체크" 용으로 사용
+    """
+    resolved = _resolve_image(image_path)
+    summary: Dict[str, Any] = {
+        "image": resolved["original"],
+        "target": resolved["target"],
+        "artifacts": {},
+    }
+
+    for key, (plugin, desc) in _ARTIFACT_PLUGINS.items():
+        result: Dict[str, Any] = {
+            "plugin": plugin,
+            "description": desc,
+            "exists": False,
+            "count": 0,
+            "error": None,
+        }
+        try:
+            r = run_single_plugin(image_path=image_path, plugin=plugin, max_rows=max_rows_per_artifact)
+            parsed = r.get("parsed")
+            if isinstance(parsed, list):
+                result["count"] = len(parsed)
+                result["exists"] = len(parsed) > 0
+            else:
+                if parsed:
+                    result["count"] = 1
+                    result["exists"] = True
+        except Exception as e:
+            result["error"] = str(e)
+        summary["artifacts"][key] = result
+
+    return summary
