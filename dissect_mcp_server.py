@@ -176,6 +176,41 @@ def _parse_plugin_listing(text: str) -> List[Dict[str, Any]]:
 
     return plugins
 
+def _filter_plugins(
+    plugins: List[Dict[str, Any]],
+    keywords: Optional[List[str]],
+) -> List[Dict[str, Any]]:
+    """
+    플러그인 메타데이터를 키워드로 필터링.
+
+    - 검색 대상 필드:
+      * name
+      * full_name (os.windows.prefetch 등)
+      * namespaces (os/windows/prefetch)
+      * description
+      * output 타입
+    - keywords 가 None/빈 리스트면 전체 반환
+    """
+    if not keywords:
+        return plugins
+
+    lowered = [k.lower() for k in keywords]
+
+    def matches(p: Dict[str, Any]) -> bool:
+        hay = " ".join(
+            [
+                p.get("name", ""),
+                p.get("full_name", ""),
+                " ".join(p.get("namespaces", [])),
+                p.get("description", ""),
+                (p.get("output") or ""),
+            ]
+        ).lower()
+        return any(k in hay for k in lowered)
+
+    return [p for p in plugins if matches(p)]
+
+
 def _parse_query_output(raw: str) -> Any:
     """
     target-query / rdump 출력 → JSON-friendly 구조 변환.
@@ -279,3 +314,59 @@ def run_single_plugin(
         "raw_stdout": cp.stdout,
         "parsed": parsed,
     }
+
+@mcp.tool()
+def run_multiple_plugins(
+    image_path: str,
+    plugin_keywords: Optional[List[str]] = None,
+    max_plugins: int = 0,
+    max_rows_per_plugin: int = 0,
+) -> Dict[str, Any]:
+    """
+    키워드 기반 플러그인 일괄 실행 래퍼.
+
+    - list_plugins 결과에서 plugin_keywords 로 필터링
+      * 예: ["prefetch", "amcache", "jumplist"]
+    - max_plugins > 0 이면 앞에서부터 해당 개수까지만 실행
+    - 각 플러그인 실행은 run_single_plugin(...) 사용
+    - 결과는 full_name 기준 딕셔너리로 반환
+    """
+    resolved = _resolve_image(image_path)
+
+    inventory = list_plugins(image_path)
+    plugins: List[Dict[str, Any]] = inventory["plugins"]
+    plugins = _filter_plugins(plugins, plugin_keywords)
+
+    if max_plugins and len(plugins) > max_plugins:
+        plugins = plugins[:max_plugins]
+
+    results: Dict[str, Any] = {
+        "image": resolved["original"],
+        "target": resolved["target"],
+        "merged": resolved["merged"],
+        "segments": resolved["segments"],
+        "count": len(plugins),
+        "filters": {
+            "plugin_keywords": plugin_keywords,
+            "max_plugins": max_plugins,
+            "max_rows_per_plugin": max_rows_per_plugin,
+        },
+        "results": {},
+    }
+
+    for p in plugins:
+        full_name = p.get("full_name") or p.get("name")
+        try:
+            r = run_single_plugin(
+                image_path=image_path,
+                plugin=full_name,
+                max_rows=max_rows_per_plugin,
+            )
+            results["results"][full_name] = r
+        except Exception as e:
+            results["results"][full_name] = {
+                "error": str(e),
+                "meta": p,
+            }
+
+    return results
