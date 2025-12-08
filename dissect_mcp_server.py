@@ -1,8 +1,12 @@
 import os
+import json
+import time
 import shutil
+import subprocess
 import re
+import tarfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from mcp.server.fastmcp import FastMCP
 
@@ -18,6 +22,37 @@ DEFAULT_EXTRACT_DIR = os.getenv("DISSECT_EXTRACT_DIR")
 
 class DissectError(RuntimeError):
     """Dissect 관련 외부 명령 실패 시 사용하는 예외."""
+
+def _run(
+    cmd: List[str],
+    cwd: Optional[Path] = None,
+    timeout: int = 0,
+    check: bool = True,
+) -> subprocess.CompletedProcess:
+    """
+    공통 subprocess.run 래퍼.
+
+    - stdout/stderr 를 텍스트(str)로 반환
+    - cwd 지정 가능
+    - timeout=0 이면 제한 없음
+    - check=True 이면 returncode != 0 일 때 DissectError 발생
+    """
+    cp = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(cwd) if cwd else None,
+        timeout=timeout or None,
+    )
+    if check and cp.returncode != 0:
+        raise DissectError(
+            f"Command failed: {' '.join(cmd)}\n"
+            f"Return code: {cp.returncode}\n"
+            f"STDERR:\n{cp.stderr}"
+        )
+    return cp
+
 
 def _resolve_image(image_path: str) -> Dict[str, Any]:
     """
@@ -69,6 +104,78 @@ def _resolve_image(image_path: str) -> Dict[str, Any]:
         "merged": merged,
     }
 
+def _parse_plugin_listing(text: str) -> List[Dict[str, Any]]:
+    """
+    `target-query <image> -l -q` 출력 파싱 → 평탄화된 플러그인 리스트 생성.
+
+    Dissect의 plugin tree 구조 예:
+        os:
+          windows:
+            prefetch:
+              prefetch - Windows Prefetch files (output: records)
+    """
+    plugins: List[Dict[str, Any]] = []
+    stack: Dict[int, str] = {}
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if line.strip().startswith("Available plugins"):
+            continue
+        if line.strip().startswith("Failed to load"):
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+
+        if stripped.endswith(":") and " - " not in stripped:
+            name = stripped[:-1]
+            stack[indent] = name
+            for k in list(stack.keys()):
+                if k > indent:
+                    del stack[k]
+            continue
+
+        if " - " in stripped:
+            plugin_name, rest = stripped.split(" - ", 1)
+
+            output_type = None
+            m_out = re.search(r"\(output:\s*([^)]*)\)", rest)
+            if m_out:
+                output_type = m_out.group(1).strip()
+                description = rest[: m_out.start()].strip()
+            else:
+                description = rest.strip()
+
+            namespaces = [v for k, v in sorted(stack.items())]
+
+            base = ".".join(namespaces)
+            last_ns = namespaces[-1] if namespaces else ""
+
+            plugin_name = plugin_name.strip()
+
+            if last_ns:
+                if plugin_name == last_ns:
+                    full_name = base
+                elif plugin_name.startswith(last_ns):
+                    full_name = base + plugin_name[len(last_ns):]
+                else:
+                    full_name = base + "." + plugin_name
+            else:
+                full_name = plugin_name
+
+            plugins.append(
+                {
+                    "name": plugin_name,
+                    "namespaces": namespaces,
+                    "description": description,
+                    "output": output_type,
+                    "full_name": full_name,
+                }
+            )
+
+    return plugins
+
 @mcp.tool()
 def disk_image_info(image_path: str) -> Dict[str, Any]:
     """
@@ -88,4 +195,29 @@ def disk_image_info(image_path: str) -> Dict[str, Any]:
         "segments": resolved["segments"],
         "size_bytes": stat.st_size,
         "extension": target.suffix.lower(),
+    }
+
+@mcp.tool()
+def list_plugins(image_path: str) -> Dict[str, Any]:
+    """
+    디스크 이미지에서 사용 가능한 Dissect 플러그인 목록 조회.
+
+    내부적으로:
+      target-query <image> -l -q
+
+    를 실행하여 계층형 플러그인 리스트를 가져온 뒤,
+    _parse_plugin_listing 으로 평탄화된 구조로 변환.
+    """
+    resolved = _resolve_image(image_path)
+
+    cmd = [TARGET_QUERY_BIN, resolved["target"], "-l", "-q"]
+    cp = _run(cmd)
+    plugins = _parse_plugin_listing(cp.stdout)
+
+    return {
+        "image": resolved["original"],
+        "target": resolved["target"],
+        "merged": resolved["merged"],
+        "segments": resolved["segments"],
+        "plugins": plugins,
     }
