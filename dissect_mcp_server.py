@@ -53,7 +53,6 @@ def _run(
         )
     return cp
 
-
 def _resolve_image(image_path: str) -> Dict[str, Any]:
     """
     디스크 이미지 경로 정규화 및 분할(raw) 이미지 병합 처리.
@@ -209,7 +208,6 @@ def _filter_plugins(
         return any(k in hay for k in lowered)
 
     return [p for p in plugins if matches(p)]
-
 
 def _parse_query_output(raw: str) -> Any:
     """
@@ -370,3 +368,31 @@ def run_multiple_plugins(
             }
 
     return results
+
+@mcp.tool()
+def extract_system_profile(image_path: str) -> Dict[str, Any]:
+    """
+    OS / Host 기본 프로파일 생성.
+
+    - hostname, OS 버전, 설치 일자, 사용자 목록
+    - 도메인, 타임존, 언어
+    - 네트워크 인터페이스 / IP / MAC 등
+    을 각각의 Dissect 플러그인(_SYSTEM_PLUGINS) 호출로 수집.
+    """
+    resolved = _resolve_image(image_path)
+    profile: Dict[str, Any] = {
+        "image": resolved["original"],
+        "target": resolved["target"],
+        "fields": {},
+        "errors": {},
+    }
+
+    for field, plugin in _SYSTEM_PLUGINS.items():
+        try:
+            r = run_single_plugin(image_path=image_path, plugin=plugin, max_rows=100)
+            parsed = r.get("parsed")
+            profile["fields"][field] = parsed
+        except Exception as e:
+            profile["errors"][field] = str(e)
+
+    return profile
