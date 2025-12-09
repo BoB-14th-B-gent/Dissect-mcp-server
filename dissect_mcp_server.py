@@ -12,13 +12,13 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("dissect-MCP")
 
-TARGET_QUERY_BIN = os.getenv("DISSECT_TARGET_QUERY", "/path/to/Dissect-mcp-server/.venv/bin/target-query")
-RDUMP_BIN = os.getenv("DISSECT_RDUMP", "/path/to/Dissect-mcp-server/.venv/bin/rdump")
-TARGET_FS_BIN = os.getenv("DISSECT_TARGET_FS", "/path/to/Dissect-mcp-server/.venv/bin/target-fs")
-ACQUIRE_BIN = os.getenv("DISSECT_ACQUIRE_BIN", "/path/to/Dissect-mcp-server/.venv/bin/acquire")
+TARGET_QUERY_BIN = os.getenv("DISSECT_TARGET_QUERY", "/Users/whiteing/GitHub/Dissect-mcp-server/.venv/bin/target-query")
+RDUMP_BIN = os.getenv("DISSECT_RDUMP", "/Users/whiteing/GitHub/Dissect-mcp-server/.venv/bin/rdump")
+TARGET_FS_BIN = os.getenv("DISSECT_TARGET_FS", "/Users/whiteing/GitHub/Dissect-mcp-server/.venv/bin/target-fs")
+ACQUIRE_BIN = os.getenv("DISSECT_ACQUIRE_BIN", "/Users/whiteing/GitHub/Dissect-mcp-server/.venv/bin/acquire")
 
-ACQUIRE_OUTPUT_DIR = os.getenv("DISSECT_ACQUIRE_DIR", "/path/to/Dissect-mcp-server/acquire_output")
-DEFAULT_EXTRACT_DIR = os.getenv("DISSECT_EXTRACT_DIR", "/path/to/Dissect-mcp-server/dissect_extracts")
+ACQUIRE_OUTPUT_DIR = os.getenv("DISSECT_ACQUIRE_DIR", "/Users/whiteing/GitHub/Dissect-mcp-server/acquire_output")
+DEFAULT_EXTRACT_DIR = os.getenv("DISSECT_EXTRACT_DIR", "/Users/whiteing/GitHub/Dissect-mcp-server/dissect_extracts")
 
 _SYSTEM_PLUGINS = {
     "hostname": "os.windows._os.hostname",
@@ -39,13 +39,13 @@ _ARTIFACT_PLUGINS = {
     "webserver": ("webserver.logs", "Returns log file records from installed webservers. (output: records)"),
     "amcache": ("os.windows.amcache", "Return Amcache"),
     "jumplist": ("os.windows.jumplist", "Return Jumplist"),
-    "evtx": ("os.windows.log.evtx.evtx", "Parse Windows Eventlog files (``*.evt``). (output: records)"),
+    # "evtx": ("os.windows.log.evtx.evtx", "Parse Windows Eventlog files (``*.evt``). (output: records)"),
     "prefetch": ("os.windows.prefetch", "Return the content of all prefetch files. (output: records)"),
     "bam": ("os.windows.regf.bam", "Parse bam and dam registry keys. (output: records)"),
     "mru.mstsc": ("os.windows.regf.mru.mstsc", "Return Terminal Server Client MRU data. (output: records)"),
     "mru.opensave": ("os.windows.regf.mru.opensave", "Return the OpenSaveMRU data. (output: records)"),
     "mru.recentdocs": ("os.windows.regf.mru.recentdocs", "Return the RecentDocs data. (output: records)"),
-    "regf": ("os.windows.regf.regf", "Return all registry keys and values. (output: records)"),
+    # "regf": ("os.windows.regf.regf", "Return all registry keys and values. (output: records)"),
     "shellbags": ("os.windows.regf.shellbags", "Yields Windows Shellbags. (output: records)"),
     "shimcache": ("os.windows.regf.shimcache", "Return the shimcache. (output: records)"),
     "userassist": ("os.windows.regf.userassist", "Return the UserAssist information for each user. (output: records)"),
@@ -55,11 +55,41 @@ _ARTIFACT_PLUGINS = {
 _TIMELINE_PLUGINS = {
     "mft": "filesystem.ntfs.mft.records",
     "prefetch": "os.windows.prefetch",
-    "amcache": "os.windows.amcache.files",
+    "amcache": "os.windows.amcache",
     "jumplist_auto": "os.windows.jumplist.automatic_destination",
     "jumplist_custom": "os.windows.jumplist.custom_destination",
+    "shellbags": "os.windows.regf.shellbags",
+    "userassist": "os.windows.regf.userassist",
+    "bam": "os.windows.regf.bam",
+    "mru_recentdocs": "os.windows.regf.mru.recentdocs",
+    "mru_opensave": "os.windows.regf.mru.opensave",
     "evtx": "os.windows.log.evtx.evtx",
+    "browser_history": "browser.history",
 }
+
+_DROP_ALWAYS = {
+    "_source",
+    "_classification",
+    "_generated",
+    "_version",
+    "_type",
+    "_recorddescriptor",
+}
+
+_EVTX_NOISE_SOURCES = {
+    "LoadPerf",
+    "EAPOL",
+    "WmdmPmSp",
+}
+
+_MFT_SYSTEM_PREFIXES = (
+    r"c:\\$mft",
+    r"c:\\$mftmirr",
+    r"c:\\$logfile",
+    r"c:\\$bitmap",
+)
+
+_MFT_USE_TS_TYPES = {"B", "M"}
 
 class DissectError(RuntimeError):
     """Dissect 관련 외부 명령 실패 시 사용하는 예외."""
@@ -216,6 +246,24 @@ def _parse_query_output(raw: str) -> Any:
     except Exception:
         pass
 
+    objs: list[Any] = []
+    for ln in s.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+
+        if isinstance(obj, dict) and obj.get("_type") == "recorddescriptor":
+            continue
+
+        objs.append(obj)
+
+    if objs:
+        return objs
+
     return [ln for ln in s.splitlines() if ln.strip()]
 
 def _ensure_extract_dir(base: Union[str, Path]) -> Path:
@@ -239,6 +287,7 @@ def _extract_timestamp(record: Dict[str, Any]) -> Optional[str]:
         "last_write_time",
         "start_time",
         "end_time",
+        "ts"
     ]
 
     for k in candidate_keys:
@@ -250,6 +299,65 @@ def _extract_timestamp(record: Dict[str, Any]) -> Optional[str]:
             return str(v)
 
     return None
+
+def _cleanup_common(rec: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in rec.items() if k not in _DROP_ALWAYS}
+
+
+def _normalize_evtx_record(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    src = rec.get("SourceName")
+    if src in _EVTX_NOISE_SOURCES:
+        return None
+
+    ts = rec.get("TimeGenerated") or rec.get("ts") or rec.get("TimeWritten")
+
+    out = _cleanup_common(rec)
+
+    if ts:
+        out["timestamp"] = ts
+
+    for k in ("ts", "TimeGenerated", "TimeWritten"):
+        if k != "timestamp":
+            out.pop(k, None)
+
+    return out
+
+
+def _is_useful_mft(rec: Dict[str, Any]) -> bool:
+    path = (rec.get("path") or "").lower()
+    if any(path.startswith(p.lower()) for p in _MFT_SYSTEM_PREFIXES):
+        return False
+
+    ts_type = rec.get("ts_type")
+    if ts_type and ts_type not in _MFT_USE_TS_TYPES:
+        return False
+
+    return True
+
+def _normalize_mft_record(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not _is_useful_mft(rec):
+        return None
+
+    out = _cleanup_common(rec)
+
+    return out
+
+def _normalize_shellbag_record(rec: Dict[str, Any]) -> Dict[str, Any]:
+    out = _cleanup_common(rec)
+
+    ts = (
+        rec.get("ts_mtime")
+        or rec.get("ts_btime")
+        or rec.get("ts_atime")
+        or rec.get("regf_mtime")
+    )
+    if ts:
+        out["timestamp"] = ts
+
+    out.pop("regf_hive_path", None)
+    out.pop("regf_key_path", None)
+
+    return out
 
 @mcp.tool()
 def disk_image_info(image_path: str) -> Dict[str, Any]:
@@ -694,10 +802,10 @@ def acquire_minimal_artifacts(
 def build_timeline(
     image_path: str,
     plugins: Optional[List[str]] = None,
-    max_rows_per_plugin: int = 5000,
+    max_rows_per_plugin: int = 500,
 ) -> Dict[str, Any]:
     """
-    여러 Dissect 타임라인 아티팩트를 묶어서 단일 정렬 타임라인 생성.
+    여러 Dissect 타임라인 아티팩트를 묶어서 단일 정렬 타임라인 생성
     """
     resolved = _resolve_image(image_path)
     selected = plugins or list(_TIMELINE_PLUGINS.keys())
@@ -712,7 +820,11 @@ def build_timeline(
             continue
 
         try:
-            r = run_single_plugin(image_path=image_path, plugin=plugin, max_rows=max_rows_per_plugin)
+            r = run_single_plugin(
+                image_path=image_path,
+                plugin=plugin,
+                max_rows=max_rows_per_plugin,
+            )
             parsed = r.get("parsed")
             if not isinstance(parsed, list):
                 continue
@@ -720,15 +832,30 @@ def build_timeline(
             for rec in parsed:
                 if not isinstance(rec, dict):
                     continue
-                ts = _extract_timestamp(rec)
+
+                if "evt" in plugin:
+                    norm = _normalize_evtx_record(rec)
+                    if norm is None:
+                        continue
+                elif "mft" in plugin:
+                    norm = _normalize_mft_record(rec)
+                    if norm is None:
+                        continue
+                elif "shellbag" in plugin:
+                    norm = _normalize_shellbag_record(rec)
+                else:
+                    norm = _cleanup_common(rec)
+
+                ts = _extract_timestamp(norm)
                 if not ts:
                     continue
+
                 timeline.append(
                     {
                         "source": key,
                         "plugin": plugin,
                         "timestamp": ts,
-                        "record": rec,
+                        "record": norm,
                     }
                 )
         except Exception as e:
