@@ -5,15 +5,17 @@ Dissect MCP Server는 [Dissect](https://docs.dissect.tools/en/stable/index.html)
 ## Tools
 
 - `disk_image_info` : 디스크 이미지의 기본 메타데이터와 분할 이미지 병합 정보 확인
-- `list_plugins` : 해당 디스크 이미지에 사용 가능한 Dissect 플러그인 목록 출력
-- `run_single_plugin` : 하나의 Dissect 플러그인 실행
+- `list_plugins` : 해당 디스크 이미지에서 사용 가능한 Dissect 플러그인 목록 조회
+- `run_single_plugin` : 단일 Dissect 플러그인 실행
 - `run_multiple_plugins` : 여러 개의 Dissect 플러그인 실행  
 - `extract_system_profile` : 기본 프로파일 정보 수집
 - `search_keyword` : 파일명, 확장자, 경로 등으로 필터링
-- `detect_artifacts_existence` : 주요 아티팩트 존재 여부 확인  
-- `extract_file_or_directory` : 디스크 이미지 내의 특정 파일 또는 디렉토리 추출
+- `list_artifact_plugins` : 사용자가 정의한 아티팩트 플러그인 목록 조회
+- `run_all_artifact_plugins` : 사용자가 정의한 아티팩트 플러그인 일괄 실행
+- `extract_file_or_directory` : 절대 경로 기반으로 디스크 이미지 내의 특정 파일 또는 디렉토리 추출
+- `extract_downloads_folder` : 지정한 사용자명의 Downloads 폴더 추출
 - `acquire_minimal_artifacts` : 최소한의 아티팩트를 tar파일로 추출하여 압축 해제
-- `build_timeline` : 타임라인 관련 아티팩트를 하나의 타임라인으로 통합
+- `build_timeline` : 사용자가 정의한 타임라인 관련 아티팩트를 추출해 하나의 타임라인으로 통합
 
 ## Installation
 
