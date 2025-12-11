@@ -39,13 +39,13 @@ _ARTIFACT_PLUGINS = {
     "webserver": ("webserver.logs", "Returns log file records from installed webservers. (output: records)"),
     "amcache": ("os.windows.amcache", "Return Amcache"),
     "jumplist": ("os.windows.jumplist", "Return Jumplist"),
-    # "evtx": ("os.windows.log.evtx.evtx", "Parse Windows Eventlog files (``*.evt``). (output: records)"),
+    "evtx": ("os.windows.log.evtx.evtx", "Parse Windows Eventlog files (``*.evt``). (output: records)"),
     "prefetch": ("os.windows.prefetch", "Return the content of all prefetch files. (output: records)"),
     "bam": ("os.windows.regf.bam", "Parse bam and dam registry keys. (output: records)"),
     "mru.mstsc": ("os.windows.regf.mru.mstsc", "Return Terminal Server Client MRU data. (output: records)"),
     "mru.opensave": ("os.windows.regf.mru.opensave", "Return the OpenSaveMRU data. (output: records)"),
     "mru.recentdocs": ("os.windows.regf.mru.recentdocs", "Return the RecentDocs data. (output: records)"),
-    # "regf": ("os.windows.regf.regf", "Return all registry keys and values. (output: records)"),
+    "regf": ("os.windows.regf.regf", "Return all registry keys and values. (output: records)"),
     "shellbags": ("os.windows.regf.shellbags", "Yields Windows Shellbags. (output: records)"),
     "shimcache": ("os.windows.regf.shimcache", "Return the shimcache. (output: records)"),
     "userassist": ("os.windows.regf.userassist", "Return the UserAssist information for each user. (output: records)"),
@@ -90,6 +90,37 @@ _MFT_SYSTEM_PREFIXES = (
 )
 
 _MFT_USE_TS_TYPES = {"B", "M"}
+
+_DROP_ALWAYS = {
+    "_source",
+    "_classification",
+    "_generated",
+    "_version",
+    "_type",
+    "_recorddescriptor",
+}
+
+def _cleanup_common(rec: Dict[str, Any]) -> Dict[str, Any]:
+    """Dissect가 붙인 내부 메타 필드(_generated 등)를 제거."""
+    return {k: v for k, v in rec.items() if k not in _DROP_ALWAYS}
+
+def _cleanup_parsed(parsed: Any) -> Any:
+    """
+    run_single_plugin, search_keyword 등에서 공통으로 사용하는
+    후처리: list/dict 내부의 Dissect 메타 필드를 제거.
+    """
+    if isinstance(parsed, list):
+        cleaned: list[Any] = []
+        for item in parsed:
+            if isinstance(item, dict):
+                cleaned.append(_cleanup_common(item))
+            else:
+                cleaned.append(item)
+        return cleaned
+    elif isinstance(parsed, dict):
+        return _cleanup_common(parsed)
+    else:
+        return parsed
 
 class DissectError(RuntimeError):
     """Dissect 관련 외부 명령 실패 시 사용하는 예외."""
@@ -241,10 +272,19 @@ def _parse_query_output(raw: str) -> Any:
     if not s:
         return []
 
+    data: Any = None
     try:
-        return json.loads(s)
+        data = json.loads(s)
     except Exception:
-        pass
+        data = None
+
+    if data is not None:
+        if isinstance(data, (list, dict)):
+            return data
+        if isinstance(data, str):
+            s = data.strip()
+        else:
+            return data
 
     objs: list[Any] = []
     for ln in s.splitlines():
@@ -415,15 +455,13 @@ def run_single_plugin(
         cp = _run(cmd_nojson)
 
     parsed = _parse_query_output(cp.stdout)
+    parsed = _cleanup_parsed(parsed)
 
     if isinstance(parsed, list) and max_rows and len(parsed) > max_rows:
         parsed = parsed[:max_rows]
 
     return {
-        "image": resolved["original"],
-        "target": resolved["target"],
         "plugin": plugin,
-        "max_rows": max_rows,
         "parsed": parsed,
     }
 
@@ -447,8 +485,6 @@ def run_multiple_plugins(
         plugins = plugins[:max_plugins]
 
     results: Dict[str, Any] = {
-        "image": resolved["original"],
-        "target": resolved["target"],
         "merged": resolved["merged"],
         "segments": resolved["segments"],
         "count": len(plugins),
@@ -544,17 +580,16 @@ def search_keyword(
                 "stderr": (err1 or "") + "\n" + (err2 or ""),
             },
         }
-
+    
     parsed = _parse_query_output(out)
+    parsed = _cleanup_parsed(parsed)
+
     if isinstance(parsed, list) and max_rows and len(parsed) > max_rows:
         parsed = parsed[:max_rows]
 
     return {
-        "image": resolved["original"],
-        "target": resolved["target"],
         "plugin": plugin,
         "search": search,
-        "max_rows": max_rows,
         "parsed": parsed,
     }
 
