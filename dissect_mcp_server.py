@@ -100,15 +100,104 @@ _DROP_ALWAYS = {
     "_recorddescriptor",
 }
 
+_SUSPICIOUS_PS_KEYWORDS = [
+    "-enc",
+    "-encodedcommand",
+    "frombase64string",
+    "invoke-webrequest",
+    "invoke-expression",
+    " iwr ",
+    " iex ",
+    "new-object net.webclient",
+    "downloadstring(",
+    "add-mppreference",
+    "set-mppreference",
+    "bypass",
+    "unrestricted",
+    "-executionpolicy",
+    "netsh advfirewall",
+    "schtasks ",
+    "reg add ",
+    "invoke-command",
+    "enter-pssession",
+    "windowstyle hidden",
+    "-w hidden",
+    "-nop",
+    "-noni",
+    "bitsadmin",
+    "certutil",
+    "http:",
+    "https:",
+    "import-module",
+]
+
+_SUSPICIOUS_CHILD_PROCESSES = (
+    "cmd.exe",
+    "wscript.exe",
+    "cscript.exe",
+    "mshta.exe",
+    "rundll32.exe",
+    "regsvr32.exe",
+    "powershell.exe",
+)
+
+_KNOWN_GOOD_CHILD_REGEX = (
+    r"\\winlogbeat\.exe$",
+)
+
+def _is_interesting_powershell(rec: dict) -> bool:
+    provider = (rec.get("Provider_Name") or "").lower()
+    event_id = int(rec.get("EventID") or 0)
+
+    if provider not in (
+        "microsoft-windows-powershell",
+        "microsoft-windows-sysmon",
+        "microsoft-windows-security-auditing",
+    ):
+        return False
+
+    if provider == "microsoft-windows-powershell" and event_id in (4103, 4104, 4105, 4106):
+        return True
+
+    if provider in ("microsoft-windows-sysmon", "microsoft-windows-security-auditing"):
+        if event_id not in (1, 4688):
+            return False
+
+    image = (rec.get("Image") or rec.get("Process_Name") or "").lower()
+    parent_image = (rec.get("ParentImage") or "").lower()
+    cmdline = (
+        rec.get("CommandLine")
+        or rec.get("ParentCommandLine")
+        or ""
+    ).lower()
+
+    if any(k in cmdline for k in _SUSPICIOUS_PS_KEYWORDS):
+        return True
+
+    has_ps = (
+        "powershell.exe" in image
+        or "powershell.exe" in parent_image
+        or "powershell.exe" in cmdline
+    )
+
+    if not has_ps:
+        return False
+
+    if "powershell.exe" in parent_image and image:
+        for good in _KNOWN_GOOD_CHILD_REGEX:
+            if re.search(good, image):
+                return False
+
+        for bad_child in _SUSPICIOUS_CHILD_PROCESSES:
+            if image.endswith(bad_child):
+                return True
+
+    return True
+
 def _cleanup_common(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """Dissect가 붙인 내부 메타 필드(_generated 등)를 제거."""
     return {k: v for k, v in rec.items() if k not in _DROP_ALWAYS}
 
 def _cleanup_parsed(parsed: Any) -> Any:
-    """
-    run_single_plugin, search_keyword 등에서 공통으로 사용하는
-    후처리: list/dict 내부의 Dissect 메타 필드를 제거.
-    """
     if isinstance(parsed, list):
         cleaned: list[Any] = []
         for item in parsed:
@@ -343,7 +432,6 @@ def _extract_timestamp(record: Dict[str, Any]) -> Optional[str]:
 def _cleanup_common(rec: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in rec.items() if k not in _DROP_ALWAYS}
 
-
 def _normalize_evtx_record(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     src = rec.get("SourceName")
     if src in _EVTX_NOISE_SOURCES:
@@ -361,7 +449,6 @@ def _normalize_evtx_record(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             out.pop(k, None)
 
     return out
-
 
 def _is_useful_mft(rec: Dict[str, Any]) -> bool:
     path = (rec.get("path") or "").lower()
@@ -591,6 +678,61 @@ def search_keyword(
         "plugin": plugin,
         "search": search,
         "parsed": parsed,
+    }
+
+@mcp.tool()
+def extract_powershell_activity(
+    image_path: str,
+    max_rows: int = 0,
+) -> Dict[str, Any]:
+    """
+    Event Log에서 PowerShell 관련 핵심 이벤트만 추출.
+    """
+    resolved = _resolve_image(image_path)
+
+    cmd = [
+        TARGET_QUERY_BIN,
+        resolved["target"],
+        "-f",
+        "os.windows.log.evtx.evtx",
+        "--json",
+    ]
+    cp = _run(cmd, check=False)
+
+    if cp.returncode != 0:
+        return {
+            "plugin": "os.windows.log.evtx.evtx",
+            "kind": "powershell_activity",
+            "error": {
+                "returncode": cp.returncode,
+                "stdout_head": "\n".join(cp.stdout.splitlines()[:50]),
+                "stderr": cp.stderr,
+            },
+        }
+
+    parsed = _parse_query_output(cp.stdout)
+    parsed = _cleanup_parsed(parsed)
+
+    if not isinstance(parsed, list):
+        parsed_list: list[Any] = []
+    else:
+        parsed_list = parsed
+
+    filtered: list[Dict[str, Any]] = []
+    for rec in parsed_list:
+        if not isinstance(rec, dict):
+            continue
+
+        if _is_interesting_powershell(rec):
+            filtered.append(rec)
+            if max_rows > 0 and len(filtered) >= max_rows:
+                break
+
+    return {
+        "plugin": "os.windows.log.evtx.evtx",
+        "kind": "powershell_activity",
+        "count": len(filtered),
+        "records": filtered,
     }
 
 @mcp.tool()
